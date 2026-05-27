@@ -4,9 +4,8 @@ import { motion } from 'framer-motion';
 import { 
   FolderOpen, Download, Play, Settings, Bell, X, Maximize2,
   FileCode, ChevronRight, ChevronDown, Menu, Volume2, VolumeX,
-  Monitor, Smartphone, AlertCircle
+  Monitor, Smartphone, AlertCircle, Send
 } from 'lucide-react';
-import AdBanner from '../components/AdBanner';
 import PushNotification from '../components/PushNotification';
 import Compiler from '../utils/compiler';
 import RussianToCode from '../utils/russianToCode';
@@ -21,16 +20,12 @@ const EditorPage = () => {
   const [language, setLanguage] = useState('pawno');
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [notifications, setNotifications] = useState([]);
-  const [showAd, setShowAd] = useState(true);
-  const [adConfig, setAdConfig] = useState({
-    enabled: true,
-    title: 'Специальное предложение!',
-    url: 'https://example.com',
-    imageUrl: ''
-  });
   const [fullscreen, setFullscreen] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [compilerOutput, setCompilerOutput] = useState([]);
+  const [ws, setWs] = useState(null);
+  const [pushLogs, setPushLogs] = useState([]);
+  const [adminMessage, setAdminMessage] = useState('');
   const editorRef = useRef(null);
 
   // Push notification on mount
@@ -51,6 +46,49 @@ const EditorPage = () => {
 
     // Add welcome notification
     addNotification('Добро пожаловать в Coder-Pawno!', 'info');
+
+    // Connect to WebSocket for push notifications
+    const wsUrl = window.location.hostname === 'localhost' 
+      ? 'ws://localhost:3000' 
+      : `wss://${window.location.host}`;
+    
+    const websocket = new WebSocket(wsUrl);
+    
+    websocket.onopen = () => {
+      console.log('Connected to push server');
+      setWs(websocket);
+    };
+    
+    websocket.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'PUSH_NOTIFICATION') {
+          const { message, type } = data.payload;
+          addNotification(message, type);
+          
+          // Show browser notification
+          if ('Notification' in window && Notification.permission === 'granted') {
+            new Notification('Coder-Pawno', {
+              body: message,
+              icon: '/vite.svg'
+            });
+          }
+        }
+      } catch (error) {
+        console.error('Error parsing WebSocket message:', error);
+      }
+    };
+    
+    websocket.onclose = () => {
+      console.log('Disconnected from push server');
+      setWs(null);
+    };
+    
+    return () => {
+      if (websocket) {
+        websocket.close();
+      }
+    };
   }, []);
 
   const playSound = (type) => {
@@ -176,18 +214,68 @@ const EditorPage = () => {
     }
   };
 
-  const sendPushToAll = (message) => {
-    // In a real app, this would use WebSocket or similar
-    addNotification('Пуш-уведомление отправлено всем пользователям', 'info');
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.ready.then(registration => {
-        registration.showNotification('Coder-Pawno', {
-          body: message,
-          icon: '/vite.svg'
-        });
+  const sendPushToAll = async (message) => {
+    if (!message.trim()) {
+      addNotification('Введите текст уведомления', 'error');
+      return;
+    }
+
+    try {
+      const response = await fetch('/api/admin/push', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message, type: 'ad' })
       });
+
+      const result = await response.json();
+      
+      if (result.success) {
+        // Log the sent notification
+        const logEntry = {
+          id: Date.now(),
+          message,
+          timestamp: new Date().toISOString(),
+          recipientsCount: activeUsersCount
+        };
+        setPushLogs(prev => [logEntry, ...prev]);
+        addNotification('Рекламное пуш-уведомление отправлено!', 'success');
+        setAdminMessage('');
+      } else {
+        addNotification('Ошибка отправки уведомления', 'error');
+      }
+    } catch (error) {
+      console.error('Error sending push:', error);
+      addNotification('Ошибка соединения с сервером', 'error');
     }
   };
+
+  const [activeUsersCount, setActiveUsersCount] = useState(0);
+
+  // Update active users count from WebSocket
+  useEffect(() => {
+    if (ws) {
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'WELCOME') {
+            setActiveUsersCount(data.payload.activeUsers);
+          } else if (data.type === 'PUSH_NOTIFICATION') {
+            const { message, type } = data.payload;
+            addNotification(message, type);
+            
+            if ('Notification' in window && Notification.permission === 'granted') {
+              new Notification('Coder-Pawno', {
+                body: message,
+                icon: '/vite.svg'
+              });
+            }
+          }
+        } catch (error) {
+          console.error('Error parsing WebSocket message:', error);
+        }
+      };
+    }
+  }, [ws]);
 
   return (
     <div style={{
@@ -197,18 +285,10 @@ const EditorPage = () => {
       background: '#1e1e1e',
       overflow: 'hidden'
     }}>
-      {/* Ad Banner */}
-      {showAd && adConfig.enabled && (
-        <AdBanner 
-          config={adConfig} 
-          onClose={() => setShowAd(false)} 
-        />
-      )}
-
       {/* Notifications */}
       <div style={{
         position: 'fixed',
-        top: showAd ? '80px' : '20px',
+        top: '20px',
         right: '20px',
         zIndex: 10000
       }}>
@@ -427,28 +507,26 @@ const EditorPage = () => {
                   fontWeight: '600',
                   marginBottom: '12px'
                 }}>
-                  Настройки рекламы
+                  Админ-панель: Пуш-уведомления
                 </div>
-                <label style={{
+                
+                <div style={{
                   display: 'flex',
                   alignItems: 'center',
                   gap: '8px',
-                  color: 'rgba(255, 255, 255, 0.7)',
+                  marginBottom: '12px',
                   fontSize: '13px',
-                  marginBottom: '12px'
+                  color: activeUsersCount > 0 ? '#10b981' : '#ef4444'
                 }}>
-                  <input
-                    type="checkbox"
-                    checked={adConfig.enabled}
-                    onChange={(e) => setAdConfig(prev => ({ ...prev, enabled: e.target.checked }))}
-                  />
-                  Показывать рекламу
-                </label>
-                <input
-                  type="text"
-                  placeholder="Название рекламы"
-                  value={adConfig.title}
-                  onChange={(e) => setAdConfig(prev => ({ ...prev, title: e.target.value }))}
+                  <Monitor size={16} />
+                  Активных пользователей: {activeUsersCount}
+                </div>
+                
+                <textarea
+                  placeholder="Введите текст рекламного уведомления..."
+                  value={adminMessage}
+                  onChange={(e) => setAdminMessage(e.target.value)}
+                  rows={3}
                   style={{
                     width: '100%',
                     padding: '8px',
@@ -457,24 +535,60 @@ const EditorPage = () => {
                     borderRadius: '6px',
                     color: 'white',
                     fontSize: '13px',
+                    resize: 'none',
                     marginBottom: '8px'
                   }}
                 />
-                <input
-                  type="url"
-                  placeholder="URL рекламы"
-                  value={adConfig.url}
-                  onChange={(e) => setAdConfig(prev => ({ ...prev, url: e.target.value }))}
+                
+                <button
+                  onClick={() => sendPushToAll(adminMessage)}
+                  className="btn-primary"
                   style={{
                     width: '100%',
                     padding: '8px',
-                    background: '#3c3c3c',
-                    border: '1px solid rgba(255, 255, 255, 0.1)',
-                    borderRadius: '6px',
-                    color: 'white',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '8px',
                     fontSize: '13px'
                   }}
-                />
+                >
+                  <Send size={16} />
+                  Отправить всем
+                </button>
+                
+                {pushLogs.length > 0 && (
+                  <div style={{
+                    marginTop: '16px',
+                    paddingTop: '12px',
+                    borderTop: '1px solid rgba(255, 255, 255, 0.1)'
+                  }}>
+                    <div style={{
+                      color: 'rgba(255, 255, 255, 0.7)',
+                      fontSize: '12px',
+                      fontWeight: '600',
+                      marginBottom: '8px'
+                    }}>
+                      История отправок:
+                    </div>
+                    {pushLogs.slice(0, 5).map(log => (
+                      <div
+                        key={log.id}
+                        style={{
+                          fontSize: '11px',
+                          color: 'rgba(255, 255, 255, 0.5)',
+                          marginBottom: '4px',
+                          wordBreak: 'break-word'
+                        }}
+                      >
+                        <span style={{ color: '#10b981' }}>✓</span> {log.message} 
+                        <span style={{ marginLeft: '8px', color: 'rgba(255, 255, 255, 0.3)' }}>
+                          ({new Date(log.timestamp).toLocaleTimeString()})
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </motion.div>

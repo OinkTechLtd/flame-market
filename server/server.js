@@ -16,6 +16,7 @@ app.use(express.static(path.join(__dirname, '../client/dist')));
 // Хранилище для пуш-уведомлений и активных пользователей
 const activeUsers = new Set();
 const notifications = [];
+const pushLogs = []; // Лог отправленных пуш-уведомлений
 
 // Конфигурация рекламы (защищена от изменения клиентом)
 const AD_CONFIG = {
@@ -52,18 +53,38 @@ app.post('/api/admin/push', (req, res) => {
   
   notifications.push(notification);
   
+  // Логируем отправку
+  const logEntry = {
+    ...notification,
+    recipientsCount: activeUsers.size,
+    recipients: Array.from(activeUsers)
+  };
+  pushLogs.push(logEntry);
+  console.log(`[PUSH LOG] Отправлено "${message}" ${activeUsers.size} пользователям`);
+  
   // Отправляем всем подключенным клиентам
+  let sentCount = 0;
   wss.clients.forEach(client => {
     if (client.readyState === WebSocket.OPEN) {
       client.send(JSON.stringify({
         type: 'PUSH_NOTIFICATION',
         payload: notification
       }));
+      sentCount++;
     }
   });
   
-  res.json({ success: true, notification });
+  console.log(`[PUSH LOG] Успешно доставлено: ${sentCount}`);
+  
+  res.json({ success: true, notification, sentCount });
 });
+
+// API для просмотра логов пуш-уведомлений (админ)
+app.get('/api/admin/push-logs', (req, res) => {
+  res.json({ logs: pushLogs.slice(-50) }); // Последние 50 записей
+});
+
+// Удаляем рекламу - оставляем только пуш-уведомления
 
 // API для компиляции кода
 app.post('/api/compile', async (req, res) => {
